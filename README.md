@@ -6,12 +6,12 @@ This project implements real-time age and gender detection using OpenCV and pre-
 
 - `main.py`: The main script to run the detection using your webcam.
 - `models/`: Contains the pre-trained models and configuration files.
-    - `age_deploy.prototxt`: Model architecture for age detection.
-    - `age_net.caffemodel`: Pre-trained weights for age detection.
-    - `gender_deploy.prototxt`: Model architecture for gender detection.
-    - `gender_net.caffemodel`: Pre-trained weights for gender detection.
-    - `opencv_face_detector_uint8.pb`: Pre-trained TensorFlow model for face detection.
-    - `opencv_face_detector.pbtxt`: Configuration for the face detector.
+  - `age_deploy.prototxt`: Model architecture for age detection.
+  - `age_net.caffemodel`: Pre-trained weights for age detection.
+  - `gender_deploy.prototxt`: Model architecture for gender detection.
+  - `gender_net.caffemodel`: Pre-trained weights for gender detection.
+  - `opencv_face_detector_uint8.pb`: Pre-trained TensorFlow model for face detection.
+  - `opencv_face_detector.pbtxt`: Configuration for the face detector.
 
 ## Requirements
 
@@ -21,11 +21,13 @@ This project implements real-time age and gender detection using OpenCV and pre-
 ## How to Run
 
 1. Install the required dependencies:
+
    ```bash
    pip install opencv-python
    ```
 
 2. Run the detection script:
+
    ```bash
    python main.py
    ```
@@ -35,6 +37,7 @@ This project implements real-time age and gender detection using OpenCV and pre-
 ## How it Works
 
 The system uses:
+
 1. A Single Shot Detector (SSD) for face detection.
 2. A pre-trained Caffe model to predict gender (Male/Female).
 3. A pre-trained Caffe model to predict age group among several categories.
