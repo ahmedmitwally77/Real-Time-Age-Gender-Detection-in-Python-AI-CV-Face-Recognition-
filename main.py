@@ -468,24 +468,6 @@ def draw_hud(img, fps, people):
         1
     )
 
-    draw_text(
-        img,
-        f"PEOPLE : {people}",
-        (WIDTH - 280, 105),
-        GREEN,
-        0.65,
-        2
-    )
-
-    draw_text(
-        img,
-        datetime.now().strftime("%H:%M:%S"),
-        (WIDTH - 280, 140),
-        WHITE,
-        0.6,
-        2
-    )
-
 # =========================================================
 # BOTTOM BAR
 # =========================================================
