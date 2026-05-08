@@ -1,320 +1,734 @@
-"""
-Real-Time Age & Gender Detection — Enhanced Version
-====================================================
-Controls:
-    Q        → Quit
-    S        → Save screenshot  (saved in /screenshots folder)
-    + / =    → Raise confidence threshold by 0.05
-    -        → Lower confidence threshold by 0.05
-"""
-
-import cv2
 import os
+import cv2
 import time
-from collections import defaultdict, deque, Counter
+import threading
+import warnings
+import numpy as np
+
+from deepface import DeepFace
 from datetime import datetime
+from collections import deque
 
-# ─────────────────────────────────────────────
-#  Model paths  (keep your models/ folder as-is)
-# ─────────────────────────────────────────────
-FACE_PROTO   = "models/opencv_face_detector.pbtxt"
-FACE_MODEL   = "models/opencv_face_detector_uint8.pb"
-AGE_PROTO    = "models/age_deploy.prototxt"
-AGE_MODEL    = "models/age_net.caffemodel"
-GENDER_PROTO = "models/gender_deploy.prototxt"
-GENDER_MODEL = "models/gender_net.caffemodel"
+# =========================================================
+# ENVIRONMENT
+# =========================================================
 
-MODEL_MEAN   = (78.4263377603, 87.7689143744, 114.895847746)
-AGE_LIST     = ['(0-2)', '(4-6)', '(8-12)', '(15-20)',
-                '(25-32)', '(38-43)', '(48-53)', '(60-100)']
-GENDER_LIST  = ['Male', 'Female']
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+os.environ["DEEPFACE_HOME"] = "models"
 
-# ─────────────────────────────────────────────
-#  Load models  (with clear error messages)
-# ─────────────────────────────────────────────
-try:
-    face_net   = cv2.dnn.readNet(FACE_MODEL,   FACE_PROTO)
-    age_net    = cv2.dnn.readNet(AGE_MODEL,    AGE_PROTO)
-    gender_net = cv2.dnn.readNet(GENDER_MODEL, GENDER_PROTO)
-    print("[OK] All 3 models loaded successfully.")
-except Exception as e:
-    print(f"[ERROR] Could not load model: {e}")
-    print("       Make sure the 'models/' folder is in the same directory as this script.")
-    exit(1)
+warnings.filterwarnings("ignore")
 
-# ─────────────────────────────────────────────
-#  Open camera
-# ─────────────────────────────────────────────
-video = cv2.VideoCapture(0)
-if not video.isOpened():
-    print("[ERROR] Cannot open camera.")
-    print("       Check that your webcam is connected and not used by another app.")
-    exit(1)
+# =========================================================
+# SETTINGS
+# =========================================================
 
-# ─────────────────────────────────────────────
-#  Config  (tweak these freely)
-# ─────────────────────────────────────────────
-PADDING           = 20      # pixels added around face before age/gender inference
-CONFIDENCE_THRESH = 0.7     # initial face-detection confidence threshold
-SMOOTHING_WINDOW  = 10      # how many past frames to average predictions over
-FRAME_SKIP        = 2       # run heavy detection only every N frames (speeds things up)
-GRID_CELL         = 80      # pixel size of grid cell used to "track" each face by position
+WINDOW_NAME = "AI Surveillance Pro"
 
-SCREENSHOTS_DIR   = "screenshots"
+# شاشة أكبر ومحترمة
+WIDTH = 1380
+HEIGHT = 780
+
+# أسرع
+FPS_LIMIT = 90
+ANALYZE_EVERY = 22
+
+# تقليل استهلاك التحليل
+ANALYZE_WIDTH = 480
+ANALYZE_HEIGHT = 270
+
+SCREENSHOTS_DIR = "screenshots"
+KNOWN_FACES_DIR = "known_faces"
+
 os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
+os.makedirs(KNOWN_FACES_DIR, exist_ok=True)
 
-# Colors  (BGR)
-COL_MALE   = (210, 140, 40)    # warm blue / teal
-COL_FEMALE = (180, 50, 210)    # purple-pink
-COL_GREEN  = (50,  210, 100)
-COL_YELLOW = (30,  210, 210)
-COL_GRAY   = (180, 180, 180)
-COL_DARK   = (18,  18,  18)
+# =========================================================
+# COLORS
+# =========================================================
 
-# ─────────────────────────────────────────────
-#  Per-face history store  (for smoothing)
-# ─────────────────────────────────────────────
-face_history = defaultdict(lambda: {
-    "gender":      deque(maxlen=SMOOTHING_WINDOW),
-    "age":         deque(maxlen=SMOOTHING_WINDOW),
-    "gender_conf": deque(maxlen=SMOOTHING_WINDOW),
-})
+CYAN = (255, 255, 0)
+GREEN = (0, 255, 120)
+RED = (0, 80, 255)
+ORANGE = (0, 170, 255)
 
-last_boxes = []    # cached bounding boxes from the last detection frame
-frame_idx  = 0
-fps_ring   = deque(maxlen=30)   # rolling timestamp window for FPS
+WHITE = (255, 255, 255)
+GRAY = (170, 170, 170)
 
+BLACK = (0, 0, 0)
+DARK = (15, 15, 15)
 
-# ═════════════════════════════════════════════
-#  Helper functions
-# ═════════════════════════════════════════════
+# =========================================================
+# EMOJIS
+# =========================================================
 
-def make_face_key(x1, y1, x2, y2):
-    """
-    Map a face's centre position to a coarse grid cell.
-    Faces that stay roughly in the same area share the same key,
-    so we can accumulate predictions across frames without complex tracking.
-    """
-    cx = (x1 + x2) // 2
-    cy = (y1 + y2) // 2
-    return (cx // GRID_CELL, cy // GRID_CELL)
+EMOJI = {
+    "happy": ":)",
+    "sad": ":(",
+    "neutral": ":|",
+    "angry": ">:(",
+    "surprise": ":O",
+    "fear": ":/",
+    "disgust": "XD"
+}
 
+# =========================================================
+# GLOBALS
+# =========================================================
 
-def draw_corner_box(img, x1, y1, x2, y2, color, thickness=2, arm=22):
-    """
-    Draw stylish corner-only bounding box instead of a full rectangle.
-    Much less cluttered when multiple faces are on screen.
-    """
-    corners = [
-        (x1, y1,  1,  1),   # top-left
-        (x2, y1, -1,  1),   # top-right
-        (x1, y2,  1, -1),   # bottom-left
-        (x2, y2, -1, -1),   # bottom-right
-    ]
-    for px, py, dx, dy in corners:
-        cv2.line(img, (px, py), (px + dx * arm, py),        color, thickness, cv2.LINE_AA)
-        cv2.line(img, (px, py), (px,            py + dy * arm), color, thickness, cv2.LINE_AA)
+latest_results = []
+analyzing = False
+running = True
 
+frame_counter = 0
 
-def draw_label(img, text, x, y, color):
-    """
-    Draw a text label with a semi-transparent dark background and a
-    coloured top-border accent line.  Automatically stays inside the frame.
-    """
-    font  = cv2.FONT_HERSHEY_SIMPLEX
-    scale = 0.58
-    thick = 1
-    pad   = 5
+fps_queue = deque(maxlen=30)
 
-    (tw, th), _ = cv2.getTextSize(text, font, scale, thick)
+known_faces = []
 
-    H, W = img.shape[:2]
+save_flash = 0
 
-    # Text anchor (clamped so label never goes off screen)
-    fx = max(pad, min(x, W - tw - pad * 2))
-    fy = max(th + pad * 2, min(y, H - pad))
+# =========================================================
+# LOAD KNOWN FACES
+# =========================================================
 
-    # Background rectangle coordinates
-    rx0 = max(0, fx - pad)
-    ry0 = max(0, fy - th - pad)
-    rx1 = min(W, fx + tw + pad)
-    ry1 = min(H, fy + pad)
+print("[INFO] Loading known faces...")
 
-    if rx1 <= rx0 or ry1 <= ry0:
-        return   # nothing to draw (edge case)
+for file in os.listdir(KNOWN_FACES_DIR):
 
-    # Blend a dark rect onto just the label region
-    roi = img[ry0:ry1, rx0:rx1]
-    dark = roi.copy()
-    dark[:] = COL_DARK
-    cv2.addWeighted(dark, 0.65, roi, 0.35, 0, roi)
-    img[ry0:ry1, rx0:rx1] = roi
+    path = os.path.join(KNOWN_FACES_DIR, file)
 
-    # Coloured top border accent
-    cv2.line(img, (rx0, ry0), (rx1, ry0), color, 2, cv2.LINE_AA)
+    if os.path.isfile(path):
 
-    # Text
-    cv2.putText(img, text, (fx, fy), font, scale, color, thick, cv2.LINE_AA)
+        name = os.path.splitext(file)[0]
 
+        known_faces.append({
+            "name": name,
+            "path": path
+        })
 
-def draw_hud(img, fps_val, n_faces):
-    """
-    Draw the info panel in the top-left corner:
-    FPS, face count, current threshold, keyboard hints.
-    """
-    H, W = img.shape[:2]
-    px0, py0, px1, py1 = 8, 8, 222, 102
+print(f"[INFO] Loaded {len(known_faces)} faces")
 
-    # semi-transparent dark background for panel
-    roi = img[py0:py1, px0:px1]
-    dark = roi.copy()
-    dark[:] = COL_DARK
-    cv2.addWeighted(dark, 0.55, roi, 0.45, 0, roi)
-    img[py0:py1, px0:px1] = roi
+# =========================================================
+# CAMERA
+# =========================================================
 
-    # Panel border
-    cv2.rectangle(img, (px0, py0), (px1, py1), (70, 70, 70), 1)
+cap = cv2.VideoCapture(0)
 
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    cv2.putText(img, f"FPS :  {fps_val:5.1f}",          (18, 30), font, 0.54, COL_GREEN,  1, cv2.LINE_AA)
-    cv2.putText(img, f"Faces: {n_faces}",                (18, 54), font, 0.54, COL_YELLOW, 1, cv2.LINE_AA)
-    cv2.putText(img, f"Thresh: {CONFIDENCE_THRESH:.2f}", (18, 76), font, 0.47, COL_GRAY,   1, cv2.LINE_AA)
-    cv2.putText(img, "[Q]uit [S]ave  [+/-] thresh",      (18, 96), font, 0.33, (110,110,110), 1, cv2.LINE_AA)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, WIDTH)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, HEIGHT)
 
+if not cap.isOpened():
 
-def smoothed_prediction(key):
-    """
-    Return the majority-vote gender, most-common age, and average confidence
-    from the stored history for a given face key.
-    Returns (None, None, 0) if no history yet.
-    """
-    h = face_history[key]
-    if not h["gender"]:
-        return None, None, 0.0
+    print("[ERROR] Camera not opened")
+    exit()
 
-    gender      = Counter(h["gender"]).most_common(1)[0][0]
-    age         = Counter(h["age"]).most_common(1)[0][0]
-    gender_conf = sum(h["gender_conf"]) / len(h["gender_conf"])
-    return gender, age, gender_conf
+# =========================================================
+# FACE FILTER
+# =========================================================
 
+def valid_face(x, y, w, h):
 
-# ═════════════════════════════════════════════
-#  Main loop
-# ═════════════════════════════════════════════
-print("\n[INFO] Detection running.")
-print("       Q → quit   |   S → screenshot   |   + / - → adjust threshold\n")
+    if w < 140 or h < 140:
+        return False
 
-while True:
-    ok, frame = video.read()
-    if not ok:
-        print("[WARN] Failed to read frame from camera — stopping.")
-        break
+    ratio = h / w
 
-    frame_idx += 1
-    fps_ring.append(time.time())
-    fps_val = (
-        (len(fps_ring) - 1) / (fps_ring[-1] - fps_ring[0])
-        if len(fps_ring) > 1 else 0.0
+    if ratio < 0.9 or ratio > 1.5:
+        return False
+
+    return True
+
+# =========================================================
+# REMOVE DUPLICATES
+# =========================================================
+
+def duplicate(box1, box2):
+
+    x1, y1, w1, h1 = box1
+    x2, y2, w2, h2 = box2
+
+    center1 = (x1 + w1//2, y1 + h1//2)
+    center2 = (x2 + w2//2, y2 + h2//2)
+
+    distance = np.sqrt(
+        (center1[0] - center2[0])**2 +
+        (center1[1] - center2[1])**2
     )
 
-    H, W = frame.shape[:2]
-    out  = frame.copy()   # we draw on this copy, never on the raw frame
+    return distance < 110
 
-    # ── Detection pass (only every FRAME_SKIP frames) ──────────────
-    if frame_idx % FRAME_SKIP == 0:
+# =========================================================
+# FACE RECOGNITION
+# =========================================================
 
-        # 1) Face detection
-        blob = cv2.dnn.blobFromImage(
-            frame, 1.0, (300, 300), [104, 117, 123], swapRB=True, crop=False
-        )
-        face_net.setInput(blob)
-        dets = face_net.forward()
+def recognize_face(face):
 
-        new_boxes = []
-        for i in range(dets.shape[2]):
-            conf = float(dets[0, 0, i, 2])
-            if conf < CONFIDENCE_THRESH:
-                continue
+    try:
 
-            x1 = max(0,     int(dets[0, 0, i, 3] * W))
-            y1 = max(0,     int(dets[0, 0, i, 4] * H))
-            x2 = min(W - 1, int(dets[0, 0, i, 5] * W))
-            y2 = min(H - 1, int(dets[0, 0, i, 6] * H))
+        for person in known_faces:
 
-            fk = make_face_key(x1, y1, x2, y2)
-
-            # 2) Crop face region (with padding, clamped to frame)
-            roi = frame[
-                max(0, y1 - PADDING) : min(H, y2 + PADDING),
-                max(0, x1 - PADDING) : min(W, x2 + PADDING),
-            ]
-            if roi.size == 0:
-                continue
-
-            # 3) Age & gender inference
-            face_blob = cv2.dnn.blobFromImage(
-                roi, 1.0, (227, 227), MODEL_MEAN, swapRB=False
+            result = DeepFace.verify(
+                face,
+                person["path"],
+                detector_backend="opencv",
+                enforce_detection=False,
+                silent=True
             )
 
-            gender_net.setInput(face_blob)
-            gp = gender_net.forward()
-            gi = int(gp[0].argmax())
-            face_history[fk]["gender"].append(GENDER_LIST[gi])
-            face_history[fk]["gender_conf"].append(float(gp[0][gi]))
+            if result["verified"]:
+                return person["name"]
 
-            age_net.setInput(face_blob)
-            ap = age_net.forward()
-            ai = int(ap[0].argmax())
-            face_history[fk]["age"].append(AGE_LIST[ai])
+        return "Unknown"
 
-            new_boxes.append((x1, y1, x2, y2, fk))
+    except:
+        return "Unknown"
 
-        last_boxes = new_boxes   # cache for skipped frames
+# =========================================================
+# ANALYZE FRAME
+# =========================================================
 
-    # ── Draw results ────────────────────────────────────────────────
-    for (x1, y1, x2, y2, fk) in last_boxes:
-        gender, age, g_conf = smoothed_prediction(fk)
-        if gender is None:
-            continue
+def analyze_frame(frame):
 
-        color = COL_MALE if gender == "Male" else COL_FEMALE
-        tag   = "M" if gender == "Male" else "F"
+    global latest_results
+    global analyzing
 
-        draw_corner_box(out, x1, y1, x2, y2, color)
+    try:
 
-        label   = f"{tag} {gender} {g_conf * 100:.0f}% | Age {age}"
-        label_y = (y1 - 6) if y1 > 45 else (y2 + 36)
-        draw_label(out, label, x1, label_y, color)
+        # تصغير للتحسين السريع
+        small = cv2.resize(
+            frame,
+            (ANALYZE_WIDTH, ANALYZE_HEIGHT)
+        )
 
-    # ── HUD overlay ─────────────────────────────────────────────────
-    draw_hud(out, fps_val, len(last_boxes))
+        results = DeepFace.analyze(
+            small,
+            actions=['age', 'gender', 'emotion'],
+            detector_backend='opencv',
+            enforce_detection=False,
+            silent=True
+        )
 
-    cv2.imshow("Age & Gender Detection — Enhanced", out)
+        if not isinstance(results, list):
+            results = [results]
 
-    # ── Keyboard controls ────────────────────────────────────────────
-    key = cv2.waitKey(1) & 0xFF
+        sx = frame.shape[1] / ANALYZE_WIDTH
+        sy = frame.shape[0] / ANALYZE_HEIGHT
 
-    if key == ord("q"):
-        print("[INFO] Quit.")
+        faces = []
+        added = []
+
+        for face in results:
+
+            region = face["region"]
+
+            x = int(region["x"] * sx)
+            y = int(region["y"] * sy)
+            w = int(region["w"] * sx)
+            h = int(region["h"] * sy)
+
+            if not valid_face(x, y, w, h):
+                continue
+
+            skip = False
+
+            for old in added:
+
+                if duplicate((x, y, w, h), old):
+                    skip = True
+                    break
+
+            if skip:
+                continue
+
+            added.append((x, y, w, h))
+
+            crop = frame[y:y+h, x:x+w]
+
+            name = "Unknown"
+
+            # تسريع التعرف
+            if crop.size > 0 and len(known_faces) > 0:
+
+                try:
+                    name = recognize_face(crop)
+                except:
+                    name = "Unknown"
+
+            emotion = face["dominant_emotion"].lower()
+
+            emoji = EMOJI.get(emotion, ":|")
+
+            faces.append({
+
+                "name": name,
+
+                "x": x,
+                "y": y,
+                "w": w,
+                "h": h,
+
+                "gender": face["dominant_gender"],
+                "age": int(face["age"]),
+
+                "emotion": emotion.upper(),
+                "emoji": emoji
+
+            })
+
+        latest_results = faces
+
+    except Exception as e:
+
+        print("[ERROR]", e)
+
+    analyzing = False
+
+# =========================================================
+# TEXT
+# =========================================================
+
+def draw_text(
+    img,
+    text,
+    pos,
+    color=WHITE,
+    scale=0.8,
+    thickness=2
+):
+
+    x, y = pos
+
+    cv2.putText(
+        img,
+        text,
+        (x+3, y+3),
+        cv2.FONT_HERSHEY_DUPLEX,
+        scale,
+        BLACK,
+        thickness + 4,
+        cv2.LINE_AA
+    )
+
+    cv2.putText(
+        img,
+        text,
+        (x, y),
+        cv2.FONT_HERSHEY_DUPLEX,
+        scale,
+        color,
+        thickness,
+        cv2.LINE_AA
+    )
+
+# =========================================================
+# PANELS
+# =========================================================
+
+def panel(img, x1, y1, x2, y2):
+
+    overlay = img.copy()
+
+    cv2.rectangle(
+        overlay,
+        (x1, y1),
+        (x2, y2),
+        DARK,
+        -1
+    )
+
+    cv2.addWeighted(
+        overlay,
+        0.82,
+        img,
+        0.18,
+        0,
+        img
+    )
+
+    cv2.rectangle(
+        img,
+        (x1, y1),
+        (x2, y2),
+        CYAN,
+        2
+    )
+
+# =========================================================
+# FACE BOX
+# =========================================================
+
+def draw_face_box(img, x, y, w, h):
+
+    color = CYAN
+
+    line = 35
+    t = 3
+
+    cv2.line(img, (x, y), (x+line, y), color, t)
+    cv2.line(img, (x, y), (x, y+line), color, t)
+
+    cv2.line(img, (x+w, y), (x+w-line, y), color, t)
+    cv2.line(img, (x+w, y), (x+w, y+line), color, t)
+
+    cv2.line(img, (x, y+h), (x+line, y+h), color, t)
+    cv2.line(img, (x, y+h), (x, y+h-line), color, t)
+
+    cv2.line(img, (x+w, y+h), (x+w-line, y+h), color, t)
+    cv2.line(img, (x+w, y+h), (x+w, y+h-line), color, t)
+
+# =========================================================
+# HUD
+# =========================================================
+
+def draw_hud(img, fps, people):
+
+    # تكبير البوكس العلوي
+    panel(img, 20, 20, 520, 185)
+
+    draw_text(
+        img,
+        "AI SURVEILLANCE PRO",
+        (45, 85),
+        CYAN,
+        1.45,
+        3
+    )
+
+    draw_text(
+        img,
+        "REAL-TIME AI DETECTION SYSTEM",
+        (45, 135),
+        GRAY,
+        0.75,
+        2
+    )
+
+    draw_text(
+        img,
+        f"FPS : {fps:.1f}",
+        (45, 178),
+        GREEN,
+        1.0,
+        3
+    )
+
+    # CONTROLS
+    panel(img, 20, 220, 360, 380)
+
+    draw_text(
+        img,
+        "[ Q ] EXIT",
+        (45, 295),
+        RED,
+        1.05,
+        3
+    )
+
+    draw_text(
+        img,
+        "[ S ] SCREENSHOT",
+        (45, 360),
+        GREEN,
+        0.95,
+        3
+    )
+
+    # RIGHT PANEL
+    panel(img, WIDTH - 320, 20, WIDTH - 20, 240)
+
+    draw_text(
+        img,
+        "DETECTION LOG",
+        (WIDTH - 285, 85),
+        CYAN,
+        0.95,
+        3
+    )
+
+    draw_text(
+        img,
+        f"PEOPLE : {people}",
+        (WIDTH - 285, 150),
+        GREEN,
+        1.0,
+        3
+    )
+
+    draw_text(
+        img,
+        datetime.now().strftime("%H:%M:%S"),
+        (WIDTH - 285, 210),
+        WHITE,
+        0.9,
+        2
+    )
+
+# =========================================================
+# BOTTOM BAR
+# =========================================================
+
+def bottom_bar(img):
+
+    panel(
+        img,
+        0,
+        HEIGHT - 55,
+        WIDTH,
+        HEIGHT
+    )
+
+    draw_text(
+        img,
+        "STATUS : RUNNING",
+        (30, HEIGHT - 18),
+        GREEN,
+        0.72,
+        2
+    )
+
+    draw_text(
+        img,
+        "AI MODEL : DEEPFACE",
+        (530, HEIGHT - 18),
+        CYAN,
+        0.72,
+        2
+    )
+
+    draw_text(
+        img,
+        "PRESS Q TO EXIT",
+        (1090, HEIGHT - 18),
+        RED,
+        0.72,
+        2
+    )
+
+# =========================================================
+# MAIN LOOP
+# =========================================================
+
+print("[INFO] AI System Started")
+
+cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
+
+# يخليها Full HD ومحترمة
+cv2.resizeWindow(WINDOW_NAME, WIDTH, HEIGHT)
+
+while running:
+
+    start = time.time()
+
+    ok, frame = cap.read()
+
+    if not ok:
         break
 
-    elif key == ord("s"):
-        path = os.path.join(
-            SCREENSHOTS_DIR,
-            f"shot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+    frame_counter += 1
+
+    output = frame.copy()
+
+    fps_queue.append(time.time())
+
+    fps = 0
+
+    if len(fps_queue) > 1:
+
+        fps = (
+            len(fps_queue) - 1
+        ) / (
+            fps_queue[-1] - fps_queue[0]
         )
-        cv2.imwrite(path, out)
-        print(f"[SAVED] {path}")
 
-    elif key in (ord("+"), ord("=")):
-        CONFIDENCE_THRESH = min(0.99, round(CONFIDENCE_THRESH + 0.05, 2))
-        print(f"[THRESH] Raised to {CONFIDENCE_THRESH:.2f}")
+    # =====================================================
+    # ANALYZE
+    # =====================================================
 
-    elif key == ord("-"):
-        CONFIDENCE_THRESH = max(0.10, round(CONFIDENCE_THRESH - 0.05, 2))
-        print(f"[THRESH] Lowered to {CONFIDENCE_THRESH:.2f}")
+    if frame_counter % ANALYZE_EVERY == 0:
 
-# ─────────────────────────────────────────────
-video.release()
+        if not analyzing:
+
+            analyzing = True
+
+            threading.Thread(
+                target=analyze_frame,
+                args=(frame.copy(),),
+                daemon=True
+            ).start()
+
+    # =====================================================
+    # DRAW FACES
+    # =====================================================
+
+    for face in latest_results:
+
+        x = face["x"]
+        y = face["y"]
+        w = face["w"]
+        h = face["h"]
+
+        draw_face_box(
+            output,
+            x,
+            y,
+            w,
+            h
+        )
+
+        # زودنا ارتفاع البوكس تحت
+        info_y1 = y + h + 10
+        info_y2 = y + h + 155
+
+        # منع الخروج خارج الشاشة
+        if info_y2 > HEIGHT - 70:
+
+            info_y1 = y - 165
+            info_y2 = y - 10
+
+        panel(
+            output,
+            x,
+            info_y1,
+            x + 270,
+            info_y2
+        )
+
+        draw_text(
+            output,
+            face["name"],
+            (x + 25, y - 15),
+            WHITE,
+            0.9,
+            3
+        )
+
+        draw_text(
+            output,
+            f"{face['gender']}",
+            (x + 25, info_y1 + 45),
+            CYAN,
+            0.82,
+            2
+        )
+
+        draw_text(
+            output,
+            f"{face['age']} YEARS",
+            (x + 25, info_y1 + 90),
+            GREEN,
+            0.82,
+            2
+        )
+
+        draw_text(
+            output,
+            f"{face['emotion']} {face['emoji']}",
+            (x + 25, info_y1 + 135),
+            ORANGE,
+            0.78,
+            2
+        )
+
+    # =====================================================
+    # HUD
+    # =====================================================
+
+    draw_hud(
+        output,
+        fps,
+        len(latest_results)
+    )
+
+    bottom_bar(output)
+
+    # =====================================================
+    # FLASH EFFECT
+    # =====================================================
+
+    if save_flash > 0:
+
+        flash = np.full_like(output, 255)
+
+        cv2.addWeighted(
+            flash,
+            0.20,
+            output,
+            0.80,
+            0,
+            output
+        )
+
+        save_flash -= 1
+
+    # =====================================================
+    # SHOW
+    # =====================================================
+
+    cv2.imshow(WINDOW_NAME, output)
+
+    key = cv2.waitKey(1) & 0xFF
+
+    # =====================================================
+    # EXIT
+    # =====================================================
+
+    if key == ord('q'):
+
+        running = False
+        break
+
+    # =====================================================
+    # SCREENSHOT
+    # =====================================================
+
+    elif key == ord('s'):
+
+        try:
+
+            timestamp = datetime.now().strftime(
+                "%Y%m%d_%H%M%S"
+            )
+
+            filename = f"shot_{timestamp}.png"
+
+            path = os.path.join(
+                SCREENSHOTS_DIR,
+                filename
+            )
+
+            success = cv2.imwrite(path, output)
+
+            if success:
+
+                save_flash = 2
+
+                print(f"[SAVED] {path}")
+
+            else:
+
+                print("[ERROR] Screenshot failed")
+
+        except Exception as e:
+
+            print("[ERROR]", e)
+
+    # =====================================================
+    # FPS LIMIT
+    # =====================================================
+
+    elapsed = time.time() - start
+
+    delay = max(1 / FPS_LIMIT - elapsed, 0)
+
+    time.sleep(delay)
+
+# =========================================================
+# CLEANUP
+# =========================================================
+
+cap.release()
+
 cv2.destroyAllWindows()
-print("[DONE] Camera released.")
+
+print("[INFO] System Closed")

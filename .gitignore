@@ -1,0 +1,12 @@
+# Models and large files
+models/
+.deepface/
+
+# Python caches
+__pycache__/
+*.pyc
+
+# Local data
+screenshots/
+known_faces/*
+!known_faces/.gitkeep
