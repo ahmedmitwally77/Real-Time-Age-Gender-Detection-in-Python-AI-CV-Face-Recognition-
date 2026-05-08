@@ -31,11 +31,11 @@ HEIGHT = 780
 
 # أسرع
 FPS_LIMIT = 90
-ANALYZE_EVERY = 22
+ANALYZE_EVERY = 60
 
 # تقليل استهلاك التحليل
-ANALYZE_WIDTH = 480
-ANALYZE_HEIGHT = 270
+ANALYZE_WIDTH = 320
+ANALYZE_HEIGHT = 180
 
 SCREENSHOTS_DIR = "screenshots"
 KNOWN_FACES_DIR = "known_faces"
@@ -302,11 +302,11 @@ def draw_text(
     cv2.putText(
         img,
         text,
-        (x+3, y+3),
+        (x, y),
         cv2.FONT_HERSHEY_DUPLEX,
         scale,
         BLACK,
-        thickness + 4,
+        thickness + 2,
         cv2.LINE_AA
     )
 
@@ -362,8 +362,12 @@ def draw_face_box(img, x, y, w, h):
 
     color = CYAN
 
-    line = 35
-    t = 3
+    # ضبط المربع ليكون أدق حول الوش (تقليل الهوامش)
+    padding = 5
+    x, y, w, h = x+padding, y+padding, w-(padding*2), h-(padding*2)
+
+    line = 25
+    t = 2
 
     cv2.line(img, (x, y), (x+line, y), color, t)
     cv2.line(img, (x, y), (x, y+line), color, t)
@@ -383,84 +387,102 @@ def draw_face_box(img, x, y, w, h):
 
 def draw_hud(img, fps, people):
 
-    # تكبير البوكس العلوي
-    panel(img, 20, 20, 520, 185)
+    # البوكس العلوي اليساري
+    panel(img, 30, 30, 380, 150)
 
     draw_text(
         img,
         "AI SURVEILLANCE PRO",
-        (45, 85),
+        (50, 65),
         CYAN,
-        1.45,
-        3
-    )
-
-    draw_text(
-        img,
-        "REAL-TIME AI DETECTION SYSTEM",
-        (45, 135),
-        GRAY,
-        0.75,
+        0.8,
         2
     )
 
     draw_text(
         img,
+        "REAL-TIME AI SYSTEM",
+        (50, 95),
+        GRAY,
+        0.5,
+        1
+    )
+
+    draw_text(
+        img,
         f"FPS : {fps:.1f}",
-        (45, 178),
+        (50, 130),
         GREEN,
-        1.0,
-        3
+        0.65,
+        2
     )
 
     # CONTROLS
-    panel(img, 20, 220, 360, 380)
+    panel(img, 30, 175, 280, 290)
 
     draw_text(
         img,
         "[ Q ] EXIT",
-        (45, 295),
+        (50, 220),
         RED,
-        1.05,
-        3
+        0.7,
+        2
     )
 
     draw_text(
         img,
-        "[ S ] SCREENSHOT",
-        (45, 360),
+        "[ S ] SHOT",
+        (50, 265),
         GREEN,
-        0.95,
-        3
+        0.7,
+        2
     )
 
     # RIGHT PANEL
-    panel(img, WIDTH - 320, 20, WIDTH - 20, 240)
+    panel(img, WIDTH - 350, 30, WIDTH - 50, 150)
 
     draw_text(
         img,
         "DETECTION LOG",
-        (WIDTH - 285, 85),
+        (WIDTH - 330, 65),
         CYAN,
-        0.95,
-        3
+        0.7,
+        2
     )
 
     draw_text(
         img,
         f"PEOPLE : {people}",
-        (WIDTH - 285, 150),
+        (WIDTH - 330, 100),
         GREEN,
-        1.0,
-        3
+        0.7,
+        2
     )
 
     draw_text(
         img,
         datetime.now().strftime("%H:%M:%S"),
-        (WIDTH - 285, 210),
+        (WIDTH - 330, 130),
         WHITE,
-        0.9,
+        0.6,
+        1
+    )
+
+    draw_text(
+        img,
+        f"PEOPLE : {people}",
+        (WIDTH - 280, 105),
+        GREEN,
+        0.65,
+        2
+    )
+
+    draw_text(
+        img,
+        datetime.now().strftime("%H:%M:%S"),
+        (WIDTH - 280, 140),
+        WHITE,
+        0.6,
         2
     )
 
@@ -470,38 +492,39 @@ def draw_hud(img, fps, people):
 
 def bottom_bar(img):
 
+    # رفعه للأعلى أكثر وتوسيطه لضمان الظهور
     panel(
         img,
-        0,
-        HEIGHT - 55,
-        WIDTH,
-        HEIGHT
+        WIDTH // 2 - 250,
+        HEIGHT - 110,
+        WIDTH // 2 + 250,
+        HEIGHT - 50
     )
 
     draw_text(
         img,
-        "STATUS : RUNNING",
-        (30, HEIGHT - 18),
+        "RUNNING",
+        (WIDTH // 2 - 220, HEIGHT - 72),
         GREEN,
-        0.72,
+        0.55,
         2
     )
 
     draw_text(
         img,
-        "AI MODEL : DEEPFACE",
-        (530, HEIGHT - 18),
+        "AI: DEEPFACE",
+        (WIDTH // 2 - 50, HEIGHT - 72),
         CYAN,
-        0.72,
+        0.55,
         2
     )
 
     draw_text(
         img,
-        "PRESS Q TO EXIT",
-        (1090, HEIGHT - 18),
+        "Q: EXIT",
+        (WIDTH // 2 + 130, HEIGHT - 72),
         RED,
-        0.72,
+        0.55,
         2
     )
 
@@ -590,43 +613,43 @@ while running:
             output,
             x,
             info_y1,
-            x + 270,
+            x + 220,
             info_y2
         )
 
         draw_text(
             output,
             face["name"],
-            (x + 25, y - 15),
+            (x + 15, y - 15),
             WHITE,
-            0.9,
-            3
+            0.75,
+            2
         )
 
         draw_text(
             output,
             f"{face['gender']}",
-            (x + 25, info_y1 + 45),
+            (x + 15, info_y1 + 35),
             CYAN,
-            0.82,
+            0.65,
             2
         )
 
         draw_text(
             output,
             f"{face['age']} YEARS",
-            (x + 25, info_y1 + 90),
+            (x + 15, info_y1 + 75),
             GREEN,
-            0.82,
+            0.65,
             2
         )
 
         draw_text(
             output,
             f"{face['emotion']} {face['emoji']}",
-            (x + 25, info_y1 + 135),
+            (x + 15, info_y1 + 115),
             ORANGE,
-            0.78,
+            0.6,
             2
         )
 
